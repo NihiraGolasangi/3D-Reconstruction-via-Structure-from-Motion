@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+.env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+*.out
+
+# Data & datasets
+data/
+dataset/
+datasets/
+*.csv
+*.h5
+*.npy
+*.npz
+*.pickle
+*.pkl
+
+# Models
+models/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# OpenCV / SfM outputs
+reconstructions/
+outputs/
+results/
+*.ply
+*.pcd
+*.obj
+*.stl
+
+# Mac junk
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
