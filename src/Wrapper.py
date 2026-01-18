@@ -13,6 +13,9 @@ from src.ExtractCameraPose import extract_camera_pose
 from src.LinearTriangulation import LinearTriangulation
 from src.DisambiguateCameraPose import disambiguate_camera_pose
 from src.NonlinearTriangulation import NonlinearTriangulation
+from src.visualize import visualize_reconstruction
+from src.LinearPnP import linear_pnp
+from src.NonlinearPnP import nonlinear_pnp
 # from src.BuildVisibilityMatrix import BuildVisibilityMatrix 
 # from src.BundleAdjustment import BundleAdjustment
 # from NonlinearPnP import nonlinear_pnp
@@ -90,11 +93,17 @@ def StructureFromMotion(image_matches, K, n_images=2):
     # 1. Initialize with first two images
     # ----------------------------------
     x1, x2 = image_matches[(1,2)]['pts1'], image_matches[(1,2)]['pts2']
+    colors = image_matches[(1,2)]['colors']
 
     F, inliers = GetInlierRANSAC(x1, x2, threshold=1, M=1000)
     print(f"Estimated Fundamental Matrix:\n{F}")
     E = esssential_matrix_from_fundamental_matrix(F, K, K)
     print(f"Estimated Essential Matrix:\n{E}")
+
+    # Filter to inliers
+    x1 = x1[inliers]
+    x2 = x2[inliers]
+    colors = colors[inliers]
 
     C_candidates, R_candidates = extract_camera_pose(E)
     print(f"Extracted {len(C_candidates)} candidate camera poses.") 
@@ -155,6 +164,7 @@ def StructureFromMotion(image_matches, K, n_images=2):
             x1, x2)
         X_candidates.append(X)
 
+
     # Disambiguate to select the correct camera pose
     C_correct, R_correct, X_init = disambiguate_camera_pose(C_candidates, R_candidates, X_candidates)
 
@@ -162,6 +172,15 @@ def StructureFromMotion(image_matches, K, n_images=2):
     print("C:", C_correct)
     print("R:", R_correct)
     print("Number of valid 3D points:", X_init.shape[0])
+
+    P1 = K @ np.hstack([np.eye(3), np.zeros((3,1))])
+    P2 = K @ np.hstack([R_correct, (-R_correct @ C_correct).reshape(3,1)])
+
+    errors_lin, mean_lin, median_lin = compute_reprojection_error(X_init, P1, P2, x1, x2)
+
+    print(f"Linear triangulation reprojection error:")
+    print(f"  Mean   : {mean_lin:.4f} pixels")
+    print(f"  Median : {median_lin:.4f} pixels")
 
     # ----------------------------------
     # 5. Nonlinear triangulation
@@ -176,33 +195,84 @@ def StructureFromMotion(image_matches, K, n_images=2):
     x2,
     X_init
 )
-    Cset = [np.zeros(3), C]
-    Rset = [np.eye(3), R]
+    Cset = [np.zeros(3), C_correct]
+    Rset = [np.eye(3), R_correct]  
+    errors_nonlin, mean_nonlin, median_nonlin = compute_reprojection_error(X_refined, P1, P2, x1, x2)
+
+    print(f"Nonlinear triangulation reprojection error:")
+    print(f"  Mean   : {mean_nonlin:.4f} pixels")
+    print(f"  Median : {median_nonlin:.4f} pixels")
+
+    point_colors = colors
+    point_tracks = [[(1, i), (2, i)] for i in range(len(X))]
+    
+    print(f"Initial reconstruction: {len(X)} points, 2 cameras")
+    
+    # Visualize initial reconstruction
+    visualize_reconstruction(X, Cset, Rset, colors=point_colors)
     print("Refined 3D points using Nonlinear Triangulation.")   
 
 
 
+
     # # ----------------------------------
-    # # 6. Register remaining images
+    # # Register remaining images
     # # ----------------------------------
+    if n_images <= 2:
+        return X, Cset, Rset
     
-    # for i in range(2, num_images):
+    print("Registering additional cameras")
 
-    #     # Get 2D–3D correspondences
-    #     x_i, X_visible = Get2D3DCorrespondences(X, i, inlier_matches)
+    registered_images = {1, 2}
+    
+    for next_img in range(3, n_images + 1):
+        print(f"\n--- Registering Camera {next_img} ---")
 
-    #     # PnP with RANSAC
-    #     C_new, R_new = PnPRANSAC(X_visible, x_i, K)
+        #we need to calulate 2d-3d correspondences for the next image
+        x_2d = []
+        X_3d = []
 
-    #     # Nonlinear PnP refinement
-    #     C_new, R_new = nonlinear_pnp(X_visible, x_i, K, C_new, R_new)
+        for reg_img in registered_images:
+            pair_key = (reg_img, next_img) if reg_img < next_img else (next_img, reg_img)
+            if pair_key not in image_matches:
+                continue
+    
+            matches = image_matches[pair_key]
+            if reg_img < next_img:
+                pts_reg, pts_next = matches['pts1'], matches['pts2']
+            else:
+                pts_reg, pts_next = matches['pts2'], matches['pts1']
 
-    #     Cset.append(C_new)
-    #     Rset.append(R_new)
+            # For each point in previous image
+            for idx, pt in enumerate(pts_reg):
+                # Check if this 2D point in previous image corresponds to a triangulated 3D point
+                # (Here X_registered keeps track of all reconstructed points)
+                if idx >= len(X):  
+                    continue
+                X_3d.append(X[idx])
+                x_2d.append(pts_next[idx])
 
-    #     # ----------------------------------
-    #     # 7. Add new 3D points
-    #     # ----------------------------------
+        # Ensure shapes are correct
+        X_3d = np.array(X_3d)
+        x_2d = np.array(x_2d)
+        if X_3d.ndim == 1:
+            X_3d = X_3d.reshape(1, 3)
+        if x_2d.ndim == 1:
+            x_2d = x_2d.reshape(1, 2)
+
+        # PnP with RANSAC
+        C_new, R_new = linear_pnp(K, X_3d, x_2d)
+
+        # Nonlinear PnP refinement
+        C_new, R_new = nonlinear_pnp(K, X_3d, x_2d, C_new, R_new)
+
+        Cset.append(C_new)
+        Rset.append(R_new)
+        print(f"Estimated Camera {next_img} pose:")
+        print("C:", C_new)
+        print("R:", R_new)
+
+    # Add new 3D points
     #     x_prev, x_curr = GetNewMatches(i, inlier_matches)
 
     #     X_new = LinearTriangulation(
